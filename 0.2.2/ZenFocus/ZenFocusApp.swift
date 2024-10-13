@@ -1,0 +1,208 @@
+//
+//  ZenFocusApp.swift
+//  ZenFocus
+//
+//  Created by Prakash Joshi on 04/09/2024.
+//
+
+import SwiftUI
+import Sparkle
+import os
+import AppKit
+
+@main
+struct ZenFocusApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var appState = AppState()
+    @StateObject private var analyticsService = AnalyticsService()
+    let persistenceController = PersistenceController.shared
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environment(\.managedObjectContext, persistenceController.container.viewContext)
+                .environmentObject(appState)
+                .environmentObject(appDelegate)
+                .environmentObject(analyticsService)
+                .onAppear { 
+                    analyticsService.trackAppLaunch() 
+                    checkAndTrackAppUpdate()
+                }
+                .onDisappear { analyticsService.trackAppClose() }
+        }
+        .commands {
+            CommandGroup(after: .appSettings) {
+                Button("Check for Updates...") {
+                    appDelegate.updaterController.checkForUpdates(nil)
+                }
+                Button("Preferences...") {
+                    appDelegate.showPreferences()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+                Button("Report a Problem") {
+                    appDelegate.reportProblem()
+                }
+            }
+        }
+    }
+
+    private func checkAndTrackAppUpdate() {
+        let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        let lastVersion = UserDefaults.standard.string(forKey: "LastAppVersion") ?? "Unknown"
+
+        if currentVersion != lastVersion {
+            analyticsService.trackAppUpdate(from: lastVersion, to: currentVersion)
+            UserDefaults.standard.set(currentVersion, forKey: "LastAppVersion")
+        }
+    }
+}
+
+class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
+    @Published var isShowingPreferences = false
+    private var preferencesWindow: NSWindow?
+    let updaterController: SPUStandardUpdaterController
+    @Published var analyticsService = AnalyticsService()
+    
+    override init() {
+        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        super.init()
+        analyticsService.configure()
+    }
+    
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        performHealthCheck()
+        updaterController.updater.checkForUpdatesInBackground()
+        
+        if analyticsService.isEnabled {
+            analyticsService.trackAppLaunch()
+        }
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        if analyticsService.isEnabled {
+            analyticsService.trackAppClose()
+        }
+    }
+    
+    func showPreferences() {
+        if let window = preferencesWindow {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            createAndShowPreferencesWindow()
+        }
+    }
+    
+    private func createAndShowPreferencesWindow() {
+        let preferencesView = PreferenceView()
+            .environmentObject(self)
+            .environmentObject(analyticsService)
+            .environment(\.managedObjectContext, PersistenceController.shared.container.viewContext)
+        
+        let controller = NSHostingController(rootView: preferencesView)
+        let window = createWindow(withTitle: "Preferences", size: NSSize(width: 600, height: 400))
+        window.contentViewController = controller
+        
+        centerWindowOnScreen(window)
+        
+        window.makeKeyAndOrderFront(nil)
+        preferencesWindow = window
+    }
+    
+    private func createWindow(withTitle title: String, size: NSSize) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = title
+        window.setContentSize(size)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+    
+    private func centerWindowOnScreen(_ window: NSWindow) {
+        if let screenFrame = NSScreen.main?.visibleFrame {
+            let windowFrame = NSRect(
+                x: screenFrame.midX - window.frame.width / 2,
+                y: screenFrame.midY - window.frame.height / 2,
+                width: window.frame.width,
+                height: window.frame.height
+            )
+            window.setFrame(windowFrame, display: true)
+        }
+    }
+    
+    func restartApp() {
+        let url = URL(fileURLWithPath: Bundle.main.resourcePath!)
+        let path = url.deletingLastPathComponent().deletingLastPathComponent().absoluteString
+        let task = Process()
+        task.launchPath = "/usr/bin/open"
+        task.arguments = [path]
+        task.launch()
+        
+        NSApplication.shared.terminate(nil)
+    }
+    
+    func reportProblem() {
+        let alert = createReportProblemAlert()
+        let response = alert.runModal()
+        
+        if response == .alertFirstButtonReturn {
+            if let input = alert.accessoryView as? NSTextField {
+                sendErrorReport(description: input.stringValue)
+            }
+        }
+    }
+    
+    private func createReportProblemAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "Report a Problem"
+        alert.informativeText = "Please describe the issue you're experiencing:"
+        alert.alertStyle = .informational
+        
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        input.placeholderString = "Describe the problem here..."
+        alert.accessoryView = input
+        
+        alert.addButton(withTitle: "Send Report")
+        alert.addButton(withTitle: "Cancel")
+        
+        return alert
+    }
+    
+    private func sendErrorReport(description: String) {
+        os_log("User reported problem: %{public}@", log: .default, type: .error, description)
+        analyticsService.trackEvent("problem_reported", properties: ["description": description])
+        
+        showConfirmationAlert()
+    }
+    
+    private func showConfirmationAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Thank You"
+        alert.informativeText = "Your problem report has been sent. We'll investigate the issue."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func performHealthCheck() {
+        if !PersistenceController.shared.isStoreAccessible() {
+            os_log("Database is not accessible", log: .default, type: .error)
+            showDatabaseErrorAlert()
+        }
+        // Add more health checks as needed
+    }
+    
+    private func showDatabaseErrorAlert() {
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "Database Error"
+            alert.informativeText = "There was an error accessing the database. Please restart the application. If the problem persists, please contact support."
+            alert.alertStyle = .critical
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+}
