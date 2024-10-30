@@ -1,0 +1,135 @@
+import SwiftUI
+import CoreData
+import AppKit
+
+struct BetterTaskRow: View {
+    @ObservedObject var task: ZenFocusTask
+    @ObservedObject var categoryManager: CategoryManager
+    var onDelete: (() -> Void)?
+    var onToggleCompletion: (() -> Void)?
+    
+    @State private var isPaused: Bool = false
+    @State private var isDisappearing = false
+    @Environment(\.managedObjectContext) private var viewContext
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    onToggleCompletion?()
+                }
+            }) {
+                ZStack {
+                    Circle()
+                        .stroke(task.isCompleted ? Color.green : Color.secondary.opacity(0.5), lineWidth: 2)
+                        .frame(width: 26, height: 26)
+                    
+                    if task.isCompleted {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 18, height: 18)
+                        
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                    } else {
+                        Circle()
+                            .fill(Color.secondary.opacity(0.1))
+                            .frame(width: 18, height: 18)
+                    }
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+            .accessibilityLabel(task.isCompleted ? "Mark as incomplete" : "Mark as complete")
+            
+            Text(task.title ?? "")
+                .strikethrough(task.isCompleted)
+                .foregroundColor(task.isCompleted ? .secondary : .primary)
+                .font(.system(size: 18, weight: .bold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            
+            Spacer()
+            
+            if task.focusedDuration > 0 {
+                Text(formatDuration(task.focusedDuration))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isPaused ? .secondary : .primary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(isPaused ? Color.secondary.opacity(0.08) : Color.accentColor.opacity(0.1))
+                    .cornerRadius(4)
+            }
+            
+            if let category = task.category {
+                categoryPill(category)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 50)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(10)
+        .shadow(color: Color.black.opacity(0.1), radius: 3, x: 0, y: 2)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+        )
+        .opacity(isDisappearing ? 0 : 1)
+        .animation(.easeOut(duration: 1.5), value: isDisappearing)
+        .onChange(of: task.isCompleted) { newValue in
+            if newValue {
+                withAnimation {
+                    isDisappearing = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    onDelete?()
+                }
+            }
+        }
+        .contextMenu {
+            Button(action: deleteTask) {
+                Label("Delete", systemImage: "trash")
+                    .foregroundColor(.red)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .taskPauseStateChanged)) { notification in
+            if let taskID = notification.userInfo?["taskID"] as? NSManagedObjectID,
+               let pauseState = notification.userInfo?["isPaused"] as? Bool,
+               taskID == task.objectID {
+                isPaused = pauseState
+                ZenFocusLogger.shared.info("Task pause state changed: \(task.title ?? ""), isPaused: \(isPaused)")
+            }
+        }
+    }
+    
+    private func categoryPill(_ category: String) -> some View {
+        Text(category)
+            .font(.system(size: 13, weight: .semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(categoryManager.colorForCategory(category))
+            .foregroundColor(CategoryManager.textColor)
+            .cornerRadius(6)
+    }
+    
+    private func formatDuration(_ duration: Double) -> String {
+        let hours = Int(duration) / 3600
+        let minutes = (Int(duration) % 3600) / 60
+        
+        if hours > 0 {
+            return String(format: "%dh %dm", hours, minutes)
+        } else {
+            return String(format: "%dm", minutes)
+        }
+    }
+    
+    private func deleteTask() {
+        withAnimation(.easeOut(duration: 0.3)) {
+            isDisappearing = true
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            onDelete?()
+        }
+    }
+}
